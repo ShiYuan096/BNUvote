@@ -1,0 +1,784 @@
+import time
+import json
+import threading
+from datetime import datetime
+from flask import Flask, render_template_string, jsonify
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from webdriver_manager.chrome import ChromeDriverManager
+    print("✅ 所有库导入成功！")
+except ImportError as e:
+    print(f"❌ 库导入失败: {e}")
+    print("请运行: pip install selenium webdriver-manager pandas flask")
+    exit(1)
+
+# ==========================================
+#  MODERN FRONTEND TEMPLATE (Vue + Tailwind + Three.js + GSAP)
+# ==========================================
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BNU Vote Monitor | Live Visualization</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- GSAP for Animations -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/Flip.min.js"></script>
+    
+    <!-- Three.js for Background -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    
+    <!-- Vue 3 for Logic -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    
+    <!-- Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;700&family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
+
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            overflow-x: hidden;
+            background-color: #0f172a;
+            color: #fff;
+        }
+        
+        .font-display {
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            opacity: 0.6;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0f172a; 
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155; 
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569; 
+        }
+
+        /* Glassmorphism Card */
+        .glass-card {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .gradient-text {
+            background: linear-gradient(135deg, #60a5fa 0%, #a78bfa 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        
+        .rank-1 { border-color: #fbbf24; box-shadow: 0 0 20px rgba(251, 191, 36, 0.2); }
+        .rank-2 { border-color: #94a3b8; box-shadow: 0 0 15px rgba(148, 163, 184, 0.2); }
+        .rank-3 { border-color: #b45309; box-shadow: 0 0 15px rgba(180, 83, 9, 0.2); }
+
+        .loader-ring {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+        }
+        .loader-ring:after {
+            content: " ";
+            display: block;
+            width: 20px;
+            height: 20px;
+            margin: 0;
+            border-radius: 50%;
+            border: 2px solid #fff;
+            border-color: #fff transparent #fff transparent;
+            animation: ring 1.2s linear infinite;
+        }
+        @keyframes ring {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="min-h-screen text-slate-200">
+
+    <!-- Three.js Background -->
+    <div id="canvas-container"></div>
+
+    <div id="app" class="relative z-10 p-4 md:p-8 max-w-[1600px] mx-auto">
+        
+        <!-- Header Section -->
+        <header class="mb-12 flex flex-col md:flex-row justify-between items-start md:items-end gap-6 border-b border-slate-700 pb-8">
+            <div>
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="px-2 py-1 text-xs font-bold tracking-wider bg-blue-600 rounded text-white uppercase">Live Monitor</span>
+                    <span v-if="loading" class="text-xs text-slate-400 flex items-center gap-2">
+                        <div class="loader-ring scale-50"></div> Refreshing...
+                    </span>
+                    <span v-else class="text-xs text-slate-400">Next update in {{ countdown }}s</span>
+                </div>
+                <h1 class="text-5xl md:text-7xl font-bold font-display tracking-tight text-white">
+                    BNU <span class="gradient-text">VOTE</span>
+                </h1>
+                <p class="mt-2 text-slate-400 max-w-lg text-sm">
+                    实时监测第二十六届十佳大学生评选数据。
+                    Data Visualization & Real-time Tracking System.
+                </p>
+            </div>
+            
+            <div class="text-right">
+                 <div class="text-xs text-slate-500 uppercase tracking-widest mb-1">Last Updated</div>
+                 <div class="font-mono text-xl md:text-2xl text-white">{{ analysis.timestamp || '--:--:--' }}</div>
+            </div>
+        </header>
+
+        <!-- Stats Grid (Bento Box Style) -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-12">
+            <!-- Total Votes -->
+            <div class="glass-card rounded-2xl p-6 relative overflow-hidden group">
+                <div class="absolute -right-4 -top-4 w-24 h-24 bg-blue-500 rounded-full blur-3xl opacity-20 group-hover:opacity-40 transition-opacity"></div>
+                <div class="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Total Votes</div>
+                <div class="text-5xl font-bold font-display text-white ref-total-votes">{{ formatNumber(analysis.total_votes) }}</div>
+                <div class="mt-4 h-1 w-full bg-slate-700 rounded-full overflow-hidden">
+                    <div class="h-full bg-blue-500 w-full animate-pulse"></div>
+                </div>
+            </div>
+
+            <!-- Average Votes -->
+            <div class="glass-card rounded-2xl p-6 relative overflow-hidden group">
+                <div class="absolute -right-4 -top-4 w-24 h-24 bg-purple-500 rounded-full blur-3xl opacity-20 group-hover:opacity-40 transition-opacity"></div>
+                <div class="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Average</div>
+                <div class="text-5xl font-bold font-display text-white ref-avg-votes">{{ formatNumber(analysis.average_votes) }}</div>
+                <div class="mt-4 flex items-center gap-2 text-xs text-purple-300">
+                    <span>Votes per candidate</span>
+                </div>
+            </div>
+
+            <!-- Max Votes -->
+            <div class="glass-card rounded-2xl p-6 relative overflow-hidden group">
+                <div class="absolute -right-4 -top-4 w-24 h-24 bg-emerald-500 rounded-full blur-3xl opacity-20 group-hover:opacity-40 transition-opacity"></div>
+                <div class="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Highest Score</div>
+                <div class="text-5xl font-bold font-display text-white ref-max-votes">{{ formatNumber(analysis.max_votes) }}</div>
+                 <div class="mt-4 text-xs text-emerald-300 truncate">
+                    Target to beat
+                </div>
+            </div>
+
+            <!-- Candidates Count -->
+            <div class="glass-card rounded-2xl p-6 flex flex-col justify-between relative overflow-hidden">
+                <div class="absolute inset-0 bg-gradient-to-br from-slate-800 to-transparent opacity-50"></div>
+                <div class="relative z-10">
+                    <div class="text-slate-400 text-xs font-bold uppercase tracking-widest mb-2">Candidates</div>
+                    <div class="text-5xl font-bold font-display text-white">{{ analysis.total_candidates }}</div>
+                </div>
+                <div class="relative z-10 text-right mt-2">
+                    <button @click="fetchData" class="text-xs bg-slate-700 hover:bg-slate-600 text-white px-3 py-1 rounded transition-colors">
+                        Force Refresh
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Candidates Masonry/Grid -->
+        <div class="mb-6 flex items-end justify-between">
+             <h2 class="text-2xl font-bold font-display text-white">Leaderboard</h2>
+             <div class="text-xs text-slate-400 hidden md:block">Sorted by Ranking</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-6" ref="gridContainer">
+            <div v-for="(candidate, index) in candidates" :key="candidate.number" 
+                 class="candidate-card glass-card rounded-xl overflow-hidden hover:translate-y-[-5px] transition-transform duration-300"
+                 :class="{'rank-1 border-2': candidate.rank === 1, 'rank-2 border-2': candidate.rank === 2, 'rank-3 border-2': candidate.rank === 3}">
+                
+                <div class="p-5">
+                    <div class="flex justify-between items-start mb-4">
+                        <div class="flex items-center gap-3">
+                            <div class="w-10 h-10 rounded-full flex items-center justify-center font-bold font-display text-lg"
+                                 :class="getRankColor(candidate.rank)">
+                                #{{ candidate.rank }}
+                            </div>
+                            <div>
+                                <h3 class="font-bold text-lg leading-tight text-white">{{ candidate.name }}</h3>
+                                <div class="text-xs text-slate-400">{{ candidate.number }}号候选人</div>
+                            </div>
+                        </div>
+                        <div v-if="candidate.vote_status.includes('已投')" class="w-2 h-2 rounded-full bg-green-500 shadow-[0_0_10px_#22c55e]"></div>
+                    </div>
+
+                    <div class="mt-6">
+                        <div class="flex justify-between items-end mb-2">
+                            <span class="text-3xl font-bold font-display text-white tracking-tight">{{ formatNumber(candidate.votes) }}</span>
+                            <span class="text-xs text-slate-500 mb-1">votes</span>
+                        </div>
+                        
+                        <!-- Progress Bar -->
+                        <div class="h-2 w-full bg-slate-700/50 rounded-full overflow-hidden">
+                            <div class="h-full rounded-full transition-all duration-1000 ease-out relative"
+                                 :style="{ width: getPercentage(candidate.votes) + '%' }"
+                                 :class="getBarColor(candidate.rank)">
+                                 <div class="absolute right-0 top-0 bottom-0 w-[2px] bg-white/50 shadow-[0_0_10px_white]"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Status Footer -->
+                <div class="px-5 py-3 bg-slate-800/50 border-t border-slate-700/50 flex justify-between items-center text-xs">
+                    <span :class="candidate.vote_status.includes('已投') ? 'text-green-400' : 'text-slate-500'">
+                        {{ candidate.vote_status }}
+                    </span>
+                    <span class="font-mono text-slate-600">{{ getPercentage(candidate.votes) }}%</span>
+                </div>
+            </div>
+        </div>
+
+        <footer class="mt-20 mb-10 text-center text-slate-600 text-sm">
+            <p>Designed with <span class="text-red-500">♥</span> & AI | BNU Vote Monitor</p>
+        </footer>
+
+    </div>
+
+    <script>
+        const { createApp, ref, onMounted, computed, watch } = Vue;
+
+        createApp({
+            setup() {
+                const candidates = ref([]);
+                const analysis = ref({
+                    total_candidates: 0,
+                    total_votes: 0,
+                    average_votes: 0,
+                    max_votes: 1,
+                    timestamp: ''
+                });
+                const loading = ref(true);
+                const countdown = ref(60);
+                let refreshTimer = null;
+
+                // Helper Functions
+                const formatNumber = (num) => {
+                    return num ? num.toLocaleString() : '0';
+                };
+
+                const getPercentage = (votes) => {
+                    if (!analysis.value.max_votes) return 0;
+                    return ((votes / analysis.value.max_votes) * 100).toFixed(1);
+                };
+
+                const getRankColor = (rank) => {
+                    if (rank === 1) return 'bg-yellow-500 text-black shadow-lg shadow-yellow-500/50';
+                    if (rank === 2) return 'bg-slate-300 text-black shadow-lg shadow-slate-300/50';
+                    if (rank === 3) return 'bg-orange-600 text-white shadow-lg shadow-orange-600/50';
+                    return 'bg-slate-800 text-slate-400 border border-slate-700';
+                };
+
+                const getBarColor = (rank) => {
+                    if (rank === 1) return 'bg-gradient-to-r from-yellow-600 to-yellow-400';
+                    if (rank === 2) return 'bg-gradient-to-r from-slate-500 to-slate-300';
+                    if (rank === 3) return 'bg-gradient-to-r from-orange-700 to-orange-500';
+                    return 'bg-gradient-to-r from-blue-900 to-blue-600';
+                };
+
+                // GSAP Animations
+                const animateStats = (newData) => {
+                    gsap.to('.ref-total-votes', {
+                        innerText: newData.total_votes,
+                        duration: 2,
+                        snap: { innerText: 1 },
+                        ease: "power2.out"
+                    });
+                };
+
+                const animateCards = () => {
+                    gsap.fromTo('.candidate-card', 
+                        { y: 50, opacity: 0 },
+                        { 
+                            y: 0, 
+                            opacity: 1, 
+                            duration: 0.6, 
+                            stagger: 0.05,
+                            ease: "back.out(1.2)"
+                        }
+                    );
+                };
+
+                // Data Fetching
+                const fetchData = async () => {
+                    loading.value = true;
+                    try {
+                        const response = await fetch('/api/vote-data');
+                        const data = await response.json();
+                        
+                        // Update Data
+                        analysis.value = data.analysis;
+                        
+                        // GSAP Number Animation Logic here if needed per element
+                        // But Vue reactivity handles the DOM, we use watcher for GSAP
+                        
+                        // Sort candidates just in case backend didn't
+                        candidates.value = data.candidates.sort((a, b) => b.votes - a.votes);
+                        
+                        countdown.value = 60;
+                        loading.value = false;
+
+                    } catch (error) {
+                        console.error("Fetch error", error);
+                        loading.value = false;
+                    }
+                };
+
+                // Watchers for animation
+                watch(() => analysis.value.total_votes, (newVal, oldVal) => {
+                    const obj = { val: oldVal };
+                    gsap.to(obj, {
+                        val: newVal,
+                        duration: 1.5,
+                        ease: "power1.out",
+                        onUpdate: () => {
+                            // This is a bit hacky with Vue's reactivity, usually handled in component
+                            // but for simplicity we rely on Vue updates for the big number
+                        }
+                    });
+                });
+
+                // Countdown Logic
+                const startTimer = () => {
+                    setInterval(() => {
+                        if (countdown.value > 0) {
+                            countdown.value--;
+                        } else {
+                            fetchData();
+                        }
+                    }, 1000);
+                };
+
+                onMounted(() => {
+                    fetchData().then(() => {
+                        animateCards();
+                    });
+                    startTimer();
+                    initThreeBackground();
+                });
+
+                return {
+                    candidates,
+                    analysis,
+                    loading,
+                    countdown,
+                    fetchData,
+                    formatNumber,
+                    getPercentage,
+                    getRankColor,
+                    getBarColor
+                };
+            }
+        }).mount('#app');
+
+        // ==========================================
+        // THREE.JS BACKGROUND
+        // ==========================================
+        function initThreeBackground() {
+            const container = document.getElementById('canvas-container');
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            
+            const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            container.appendChild(renderer.domElement);
+
+            // Particles
+            const particlesGeometry = new THREE.BufferGeometry();
+            const particlesCount = 700;
+            const posArray = new Float32Array(particlesCount * 3);
+
+            for(let i = 0; i < particlesCount * 3; i++) {
+                posArray[i] = (Math.random() - 0.5) * 15; // Spread
+            }
+
+            particlesGeometry.setAttribute('position', new THREE.BufferAttribute(posArray, 3));
+
+            const material = new THREE.PointsMaterial({
+                size: 0.02,
+                color: 0x60a5fa, // Blue-ish
+                transparent: true,
+                opacity: 0.8,
+            });
+
+            // Lines connecting particles
+            // Note: Lines require iterating, for performance in this demo we use Points + specific animated mesh
+            const particlesMesh = new THREE.Points(particlesGeometry, material);
+            scene.add(particlesMesh);
+
+            // Add a floating geometric mesh
+            const geo = new THREE.IcosahedronGeometry(4, 1);
+            const mat = new THREE.MeshBasicMaterial({ 
+                color: 0x6366f1, 
+                wireframe: true, 
+                transparent: true, 
+                opacity: 0.05 
+            });
+            const wireMesh = new THREE.Mesh(geo, mat);
+            scene.add(wireMesh);
+
+            camera.position.z = 5;
+
+            // Mouse interaction
+            let mouseX = 0;
+            let mouseY = 0;
+            let targetX = 0;
+            let targetY = 0;
+
+            const windowHalfX = window.innerWidth / 2;
+            const windowHalfY = window.innerHeight / 2;
+
+            document.addEventListener('mousemove', (event) => {
+                mouseX = (event.clientX - windowHalfX);
+                mouseY = (event.clientY - windowHalfY);
+            });
+
+            const clock = new THREE.Clock();
+
+            function animate() {
+                requestAnimationFrame(animate);
+                const elapsedTime = clock.getElapsedTime();
+
+                targetX = mouseX * 0.001;
+                targetY = mouseY * 0.001;
+
+                particlesMesh.rotation.y += 0.001;
+                particlesMesh.rotation.x += 0.0005;
+
+                // Wave effect on particles
+                // Simple oscillation
+                particlesMesh.position.y = Math.sin(elapsedTime * 0.2) * 0.2;
+
+                wireMesh.rotation.x += 0.001;
+                wireMesh.rotation.y += 0.001;
+                
+                // Interactive rotation
+                particlesMesh.rotation.y += 0.05 * (targetX - particlesMesh.rotation.y);
+                particlesMesh.rotation.x += 0.05 * (targetY - particlesMesh.rotation.x);
+
+                renderer.render(scene, camera);
+            }
+
+            animate();
+
+            // Handle Resize
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+    </script>
+</body>
+</html>
+'''
+
+# ==========================================
+#  BACKEND LOGIC (Unchanged mostly)
+# ==========================================
+
+class VoteDataManager:
+    def __init__(self):
+        self.current_data = None
+        self.last_update = None
+        self.update_interval = 300  # 5分钟更新一次数据
+    
+    def get_data(self):
+        """获取当前数据，如果数据太旧则更新"""
+        if (self.current_data is None or 
+            self.last_update is None or 
+            (datetime.now() - self.last_update).seconds > self.update_interval):
+            # 如果没有数据或数据过期，尝试触发更新
+            # 但为了不阻塞请求，如果刚好在更新中，这里可能返回旧数据
+            # 实际生产中最好是后台线程负责更新，这里只读
+            pass
+        return self.current_data
+    
+    def update_data(self):
+        """更新数据"""
+        print("🔄 正在更新投票数据...")
+        try:
+            solver = BNUVoteSolver()
+            # ==========================================
+            # ⚠️ 在这里填入你的学号和密码
+            # ==========================================
+            result = solver.run("202211010022", "2798197967zhB")
+            
+            if result:
+                self.current_data = result
+                self.last_update = datetime.now()
+                print(f"✅ 数据更新成功，时间: {self.last_update}")
+            else:
+                print("❌ 数据更新失败")
+        except Exception as e:
+            print(f"❌ 更新数据时出错: {e}")
+
+class BNUVoteDataExtractor:
+    def __init__(self, driver):
+        self.driver = driver
+    
+    def extract_candidate_data(self):
+        """从投票页面提取候选人数据"""
+        print("📊 正在提取候选人数据...")
+        
+        try:
+            WebDriverWait(self.driver, 10).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "info-item"))
+            )
+            
+            candidate_items = self.driver.find_elements(By.CLASS_NAME, "info-item")
+            print(f"✅ 找到 {len(candidate_items)} 个候选人")
+            
+            candidates_data = []
+            
+            for item in candidate_items:
+                try:
+                    candidate_data = self.extract_single_candidate(item)
+                    if candidate_data:
+                        candidates_data.append(candidate_data)
+                except Exception as e:
+                    print(f"❌ 提取单个候选人数据失败: {e}")
+                    continue
+            
+            # 按票数排序
+            candidates_data.sort(key=lambda x: x['votes'], reverse=True)
+            
+            return candidates_data
+            
+        except Exception as e:
+            print(f"❌ 提取候选人数据失败: {e}")
+            return []
+    
+    def extract_single_candidate(self, candidate_element):
+        try:
+            detail_element = candidate_element.find_element(By.CLASS_NAME, "detail")
+            name_text = detail_element.find_element(By.TAG_NAME, "p").text
+            
+            if "号" in name_text:
+                number_part = name_text.split("号")[0].strip()
+                name_part = name_text.split("号")[1].strip()
+                candidate_number = int(number_part)
+                candidate_name = name_part
+            else:
+                candidate_number = 0
+                candidate_name = name_text
+            
+            vote_box = candidate_element.find_element(By.CLASS_NAME, "vote-box")
+            vote_text = vote_box.find_element(By.CLASS_NAME, "num").text
+            
+            if "票" in vote_text:
+                votes = int(vote_text.replace("票", "").strip())
+            else:
+                votes = int(vote_text)
+            
+            try:
+                vote_button = candidate_element.find_element(By.CLASS_NAME, "btn-vote")
+                vote_status = vote_button.text
+            except:
+                vote_status = "未知"
+            
+            candidate_data = {
+                'number': candidate_number,
+                'name': candidate_name,
+                'votes': votes,
+                'vote_status': vote_status,
+                'rank': 0
+            }
+            
+            return candidate_data
+            
+        except Exception as e:
+            # print(f"❌ 解析候选人元素失败: {e}")
+            return None
+    
+    def analyze_vote_results(self, candidates_data):
+        if not candidates_data:
+            return None
+        
+        total_votes = sum(candidate['votes'] for candidate in candidates_data)
+        max_votes = max(candidate['votes'] for candidate in candidates_data) if candidates_data else 0
+        min_votes = min(candidate['votes'] for candidate in candidates_data) if candidates_data else 0
+        
+        sorted_candidates = sorted(candidates_data, key=lambda x: x['votes'], reverse=True)
+        for i, candidate in enumerate(sorted_candidates, 1):
+            candidate['rank'] = i
+        
+        analysis = {
+            'total_candidates': len(candidates_data),
+            'total_votes': total_votes,
+            'average_votes': round(total_votes / len(candidates_data), 2) if candidates_data else 0,
+            'max_votes': max_votes,
+            'min_votes': min_votes,
+            'top_candidates': sorted_candidates[:5],
+            'timestamp': time.strftime("%H:%M:%S")
+        }
+        
+        return analysis
+
+class BNUVoteSolver:
+    def __init__(self):
+        self.driver = None
+        self.setup_driver()
+    
+    def setup_driver(self):
+        print("🚀 正在初始化浏览器...")
+        try:
+            chrome_options = Options()
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
+            chrome_options.add_argument('--headless') # 默认开启无头模式，后台运行
+            chrome_options.add_argument('--window-size=1400,900')
+            chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+            
+            service = Service(ChromeDriverManager().install())
+            self.driver = webdriver.Chrome(service=service, options=chrome_options)
+            print("✅ 浏览器初始化成功！")
+        except Exception as e:
+            print(f"❌ 浏览器初始化失败: {e}")
+            raise
+    
+    def solve_login(self, username, password):
+        try:
+            self.driver.get("https://onewechat.bnu.edu.cn/site/vote/index?id=1503")
+            time.sleep(3)
+            
+            if "登录" in self.driver.title:
+                print("🔐 执行登录...")
+                
+                # JS 注入登录
+                script = f"""
+                if (typeof vm !== 'undefined') {{
+                    vm.username = "{username}";
+                    vm.password = "{password}";
+                    vm.login();
+                    return true;
+                }}
+                return false;
+                """
+                self.driver.execute_script(script)
+                time.sleep(5)
+                
+                # 备用 Selenium 登录
+                if "登录" in self.driver.title:
+                    try:
+                        self.driver.find_element(By.CSS_SELECTOR, "input[type='text']").send_keys(username)
+                        self.driver.find_element(By.CSS_SELECTOR, "input[type='password']").send_keys(password)
+                        self.driver.find_element(By.CSS_SELECTOR, "div.btn").click()
+                        time.sleep(5)
+                    except:
+                        pass
+
+            return True 
+        except Exception as e:
+            print(f"❌ 登录过程异常: {e}")
+            return False
+    
+    def extract_vote_data_after_login(self):
+        try:
+            # 尝试点击查看统计
+            try:
+                # 这里的XPath可能需要根据实际页面微调
+                btns = self.driver.find_elements(By.XPATH, "//button[contains(text(), '统计') or contains(text(), '结果')]")
+                if btns:
+                    self.driver.execute_script("arguments[0].click();", btns[0])
+                    time.sleep(3)
+            except:
+                pass
+            
+            extractor = BNUVoteDataExtractor(self.driver)
+            candidates_data = extractor.extract_candidate_data()
+            analysis = extractor.analyze_vote_results(candidates_data)
+            
+            if not candidates_data:
+                return None
+                
+            return {'candidates': candidates_data, 'analysis': analysis}
+            
+        except Exception as e:
+            print(f"❌ 数据提取异常: {e}")
+            return None
+
+    def run(self, username, password):
+        try:
+            if not self.solve_login(username, password):
+                return None
+            result = self.extract_vote_data_after_login()
+            return result
+        finally:
+            if self.driver:
+                self.driver.quit()
+
+# Flask App
+app = Flask(__name__)
+data_manager = VoteDataManager()
+
+@app.route('/')
+def index():
+    return HTML_TEMPLATE
+
+@app.route('/api/vote-data')
+def api_vote_data():
+    data = data_manager.get_data()
+    # Mock data for testing if no real data (取消注释以测试前端效果)
+    # if not data:
+    #     import random
+    #     mock_candidates = []
+    #     for i in range(1, 21):
+    #         mock_candidates.append({
+    #             'number': i, 'name': f'测试候选人{i}', 'votes': random.randint(100, 1000), 
+    #             'vote_status': '未投票', 'rank': i
+    #         })
+    #     mock_candidates.sort(key=lambda x:x['votes'], reverse=True)
+    #     for i, c in enumerate(mock_candidates): c['rank'] = i+1
+    #     data = {'candidates': mock_candidates, 'analysis': {'total_votes': sum(c['votes'] for c in mock_candidates), 'total_candidates': 20, 'average_votes': 500, 'max_votes': mock_candidates[0]['votes'], 'timestamp': '12:00:00'}}
+    
+    if data:
+        return jsonify(data)
+    else:
+        return jsonify({'error': 'Waiting for data...'}), 503
+
+def start_background_updater():
+    def update_loop():
+        # 初始立即运行一次
+        data_manager.update_data()
+        while True:
+            time.sleep(300) # 5分钟间隔
+            data_manager.update_data()
+    
+    update_thread = threading.Thread(target=update_loop, daemon=True)
+    update_thread.start()
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print("🚀 BNU VOTE MONITOR - MODERN UI EDITION")
+    print("📍 http://localhost:5000")
+    print("=" * 60)
+    
+    start_background_updater()
+    app.run(host='0.0.0.0', port=5000, debug=False)
